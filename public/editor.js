@@ -218,6 +218,15 @@ async function loadVersions() {
       : '<option value="">（尚无已发布版本）</option>';
     if (keep && data.versions.some((v) => String(v.versionNo) === keep)) sel.value = keep;
   }
+  // 勘误附记的目标版本下拉（撤回版可查阅不可登记，同样标注）
+  const esel = $('#errataVersion');
+  if (esel) {
+    const keep = esel.value;
+    esel.innerHTML = data.versions.length
+      ? data.versions.map((v) => `<option value="${v.versionNo}">第 ${v.versionNo} 版${v.retracted ? '（已撤回，仅查阅）' : ''}</option>`).join('')
+      : '<option value="">（尚无已发布版本）</option>';
+    if (keep && data.versions.some((v) => String(v.versionNo) === keep)) esel.value = keep;
+  }
   $('#versionList').innerHTML = data.versions.length
     ? data.versions.map((v) => `
         <div class="rel-line"${v.retracted ? ' style="opacity:.75"' : ''}>
@@ -1421,6 +1430,187 @@ async function commitEditSession() {
   }
 }
 
+// ---------- 勘误附记（对指定已发布版本的事件 / 「先于」关系） ----------
+let errataVersionData = null; // 当前加载的目标版 {versionNo, detail, errata:{targets}}
+let errataSelected = null;    // 当前选中的附记目标 {targetType, targetId}
+
+function showErrataMsg(kind, html) {
+  $('#errataMsg').innerHTML = `<div class="alert ${kind}">${html}</div>`;
+}
+
+function errataTargetLabel(targetType, targetId) {
+  const d = errataVersionData && errataVersionData.detail;
+  if (!d) return `#${targetId}`;
+  if (targetType === 'event') {
+    const ev = d.events.find((e) => e.eventId === targetId);
+    return `事件「${ev ? ev.title : '#' + targetId}」`;
+  }
+  const rel = d.relations.find((r) => r.relationId === targetId);
+  if (!rel) return `关系 #${targetId}`;
+  const titleOf = (id) => (d.events.find((e) => e.eventId === id) || {}).title || `#${id}`;
+  return `关系「${titleOf(rel.earlierEventId)} 先于 ${titleOf(rel.laterEventId)}」`;
+}
+
+function errataEffectiveOf(targetType, targetId) {
+  const t = errataVersionData && errataVersionData.errata.targets.find(
+    (x) => x.targetType === targetType && x.targetId === targetId
+  );
+  return t ? t.effective : null;
+}
+
+async function loadErrataVersion() {
+  const no = Number($('#errataVersion').value);
+  if (!no) { showErrataMsg('error', '请先发布一个版本，再对其登记勘误附记。'); return; }
+  errataSelected = null;
+  $('#errataForm').style.display = 'none';
+  try {
+    const [raw, list] = await Promise.all([
+      api('GET', `/api/editor/versions/${no}/raw`),
+      api('GET', `/api/editor/versions/${no}/errata`),
+    ]);
+    errataVersionData = { versionNo: no, detail: raw.version, retraction: raw.retraction, errata: list };
+    renderErrataPool();
+    renderErrataList();
+    const retractHint = raw.retraction
+      ? `注意：第 ${no} 版已撤回（${esc(raw.retraction.reason)}），只能查阅附记，不能登记新附记。`
+      : `可点击下方任一事件或「先于」关系登记附记；已撤回版不能登记。`;
+    showErrataMsg(raw.retraction ? 'warn' : 'ok',
+      `已加载第 ${no} 版：${raw.version.eventCount} 个事件、${raw.version.relationCount} 条关系、
+       附记 ${list.totalCount} 条（${list.targets.length} 个目标）。${retractHint}`);
+  } catch (err) {
+    if (err.message !== 'unauthorized') showErrataMsg('error', esc(err.message));
+  }
+}
+
+function renderErrataPool() {
+  const d = errataVersionData && errataVersionData.detail;
+  if (!d) { $('#errataTargetPool').innerHTML = ''; return; }
+  const btn = (targetType, targetId, label) => {
+    const eff = errataEffectiveOf(targetType, targetId);
+    return `
+      <button class="secondary" type="button" data-errata-target="${targetType}:${targetId}"
+              style="margin:2px 4px 2px 0;padding:3px 10px;font-size:13px">
+        ＋ ${esc(label)}
+        ${eff ? `<span class="badge prec">附记 #${eff.errataId}</span>` : ''}
+      </button>`;
+  };
+  const titleOf = (id) => (d.events.find((e) => e.eventId === id) || {}).title || `#${id}`;
+  $('#errataTargetPool').innerHTML = `
+    <p class="muted" style="margin:4px 0">第 ${errataVersionData.versionNo} 版快照对象（点击选择附记目标；带徽标的已有生效附记）：</p>
+    ${d.events.map((e) => btn('event', e.eventId, `${e.title} (#${e.eventId})`)).join('')}
+    ${d.relations.map((r) => btn('relation', r.relationId,
+      `${titleOf(r.earlierEventId)} 先于 ${titleOf(r.laterEventId)} (关系 #${r.relationId})`)).join('')}`;
+}
+
+function selectErrataTarget(targetType, targetId) {
+  errataSelected = { targetType, targetId };
+  $('#errataForm').style.display = '';
+  $('#errataTargetInfo').textContent = errataTargetLabel(targetType, targetId);
+  renderErrataCurrent();
+  $('#errataNote').focus();
+}
+
+function renderErrataCurrent() {
+  if (!errataSelected) { $('#errataCurrent').innerHTML = ''; return; }
+  const eff = errataEffectiveOf(errataSelected.targetType, errataSelected.targetId);
+  const retracted = errataVersionData && errataVersionData.retraction;
+  $('#errataCurrent').innerHTML = eff
+    ? `<div class="rel-line" style="background:#fff">
+         <span class="badge prec">当前生效附记 #${eff.errataId}</span>
+         <div>${esc(eff.note)}</div>
+         <div class="source"><b>出处原文：</b>${esc(eff.source)}</div>
+         <div class="muted">登记于 ${esc(eff.createdAt)} UTC${eff.editor ? ` · ${esc(eff.editor)}` : ''}；
+           提交新附记将<b>替代</b>本条（旧条保留供追溯）。</div>
+       </div>`
+    : '<p class="muted">该目标尚无附记，本次登记为首条。</p>';
+  $('#btnErrataSubmit').textContent = eff ? `替代附记 #${eff.errataId}（提交所见附记号）` : '登记附记';
+  $('#btnErrataSubmit').disabled = Boolean(retracted);
+}
+
+async function submitErrata() {
+  if (!errataVersionData || !errataSelected) return;
+  const note = $('#errataNote').value.trim();
+  const source = $('#errataSource').value.trim();
+  if (!note) { showErrataMsg('error', '勘误说明不能为空。'); return; }
+  if (!source) { showErrataMsg('error', '勘误出处不能为空。'); return; }
+  const eff = errataEffectiveOf(errataSelected.targetType, errataSelected.targetId);
+  const btn = $('#btnErrataSubmit');
+  btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/editor/errata', {
+      versionNo: errataVersionData.versionNo,
+      targetType: errataSelected.targetType,
+      targetId: errataSelected.targetId,
+      note,
+      source,
+      editor: store.editor || '匿名编辑',
+      ...(eff ? { replacesErrataId: eff.errataId } : {}),
+    });
+    $('#errataNote').value = '';
+    $('#errataSource').value = '';
+    await reloadErrataVersion();
+    showErrataMsg('ok',
+      data.replaced
+        ? `已登记 <b>附记 #${data.errata.errataId}</b> 并替代附记 #${data.replaced.errataId}
+           （旧附记保留在替代链中供追溯）。访客读取该版时可见新附记。`
+        : `已登记 <b>附记 #${data.errata.errataId}</b>（该目标首条）。访客读取该版时可见；
+           附记只属于第 ${data.errata.versionNo} 版，不随后续版本继承。`);
+  } catch (err) {
+    if (err.message === 'unauthorized') return;
+    if (err.status === 409 && err.body && err.body.code === 'ERRATA_CONFLICT') {
+      // 两人同时替代：对方已成功，本次未落库；展示当前生效附记供核对
+      const cur = err.body.current;
+      await reloadErrataVersion();
+      showErrataMsg('error', `
+        <b>替代冲突，本次未落库。</b>${esc(err.body.message)}<br>
+        ${cur ? `当前生效附记 #${cur.errataId}：「${esc(cur.note)}」（出处：${esc(cur.source)}${cur.editor ? ` · ${esc(cur.editor)}` : ''}）。
+          你填写的说明与出处仍保留在输入框中，确认要替代当前附记可再次提交。` : ''}`);
+    } else if (err.status === 409 && err.body && err.body.code === 'VERSION_RETRACTED') {
+      await reloadErrataVersion();
+      showErrataMsg('error', esc(err.body.message));
+    } else {
+      showErrataMsg('error', esc(err.message));
+    }
+  } finally {
+    // 撤回版不可登记（renderErrataCurrent 也会按此控制）
+    btn.disabled = Boolean(errataVersionData && errataVersionData.retraction);
+  }
+}
+
+async function reloadErrataVersion() {
+  const no = errataVersionData.versionNo;
+  const [raw, list] = await Promise.all([
+    api('GET', `/api/editor/versions/${no}/raw`),
+    api('GET', `/api/editor/versions/${no}/errata`),
+  ]);
+  errataVersionData = { versionNo: no, detail: raw.version, retraction: raw.retraction, errata: list };
+  renderErrataPool();
+  renderErrataList();
+  if (errataSelected) renderErrataCurrent();
+}
+
+function renderErrataList() {
+  const data = errataVersionData && errataVersionData.errata;
+  if (!data) { $('#errataList').innerHTML = '尚未加载。'; return; }
+  if (!data.targets.length) {
+    $('#errataList').innerHTML = `<p class="muted">第 ${data.versionNo} 版尚无勘误附记。</p>`;
+    return;
+  }
+  const itemHtml = (x, isEffective) => `
+    <div class="rel-line" style="${isEffective ? '' : 'opacity:.75'}">
+      <span class="badge ${isEffective ? 'prec' : ''}">附记 #${x.errataId}${isEffective ? ' · 生效' : ' · 已被替代'}</span>
+      <div>${esc(x.note)}</div>
+      <div class="source"><b>出处原文：</b>${esc(x.source)}</div>
+      <div class="muted">登记于 ${esc(x.createdAt)} UTC${x.editor ? ` · ${esc(x.editor)}` : ''}${x.replacesErrataId ? ` · 替代附记 #${x.replacesErrataId}` : ' · 该目标首条'}</div>
+    </div>`;
+  $('#errataList').innerHTML = data.targets.map((t) => `
+    <div class="card" style="background:#fff;margin-bottom:8px">
+      <h3 style="font-size:13px">${esc(errataTargetLabel(t.targetType, t.targetId))}
+        <span class="muted">（${t.targetType === 'event' ? '事件' : '关系'} #${t.targetId} · 共 ${t.chain.length} 条附记）</span></h3>
+      ${t.chain.map((x) => itemHtml(x, x.errataId === t.effective.errataId)).join('')}
+    </div>`).join('');
+}
+
 // ---------- 事件委托：增删改 ----------
 async function onClick(e) {
   const t = e.target;
@@ -1468,6 +1658,15 @@ async function onClick(e) {
   if (t.id === 'btnRedactPreview') return previewRedaction();
   if (t.id === 'redactCancel') { $('#redactDialog').close(); redactPreview = null; return; }
   if (t.id === 'redactConfirm') return confirmRedaction();
+
+  // 勘误附记
+  if (t.id === 'btnErrataLoad') return loadErrataVersion();
+  if (t.id === 'btnErrataSubmit') return submitErrata();
+  const errataTarget = t.dataset && t.dataset.errataTarget;
+  if (errataTarget !== undefined) {
+    const [targetType, targetId] = errataTarget.split(':');
+    return selectErrataTarget(targetType, Number(targetId));
+  }
   if (t.id === 'rawVersionClose') { $('#rawVersionDialog').close(); return; }
   const rawVersion = t.dataset && t.dataset.rawVersion;
   if (rawVersion !== undefined) return openRawVersion(Number(rawVersion));

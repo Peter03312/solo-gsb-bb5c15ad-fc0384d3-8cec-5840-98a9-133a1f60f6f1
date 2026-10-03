@@ -61,6 +61,24 @@ async function main() {
           </div>`).join('')
       : '<p class="muted">本版未记录先于关系。</p>';
 
+    // 勘误附记：本版各目标的最新生效附记（出处已按遮盖规则处理）
+    if (Array.isArray(v.errata) && v.errata.length) {
+      $('#errataCard').style.display = '';
+      $('#errata').innerHTML = v.errata.map((x) => {
+        const target = x.targetType === 'event'
+          ? `事件「${esc((x.target && x.target.title) || '#' + x.targetId)}」`
+          : `「先于」关系：${esc((x.target && x.target.earlierTitle) || '#' + (x.target && x.target.earlierEventId))}
+             <span class="badge">先于</span> ${esc((x.target && x.target.laterTitle) || '#' + (x.target && x.target.laterEventId))}`;
+        return `
+          <div class="rel-line">
+            <span class="badge prec">勘误</span> ${target}
+            <div>${esc(x.note)}</div>
+            <div class="source"><b>出处：</b>${esc(x.source)}</div>
+            <div class="muted">附记 #${x.errataId} · 登记于 ${esc(x.createdAt)} UTC${x.editor ? ` · ${esc(x.editor)}` : ''}</div>
+          </div>`;
+      }).join('');
+    }
+
     loadRoutes();
   } catch (err) {
     msg.innerHTML = `<div class="alert error">加载失败：${esc(err.message)}</div>`;

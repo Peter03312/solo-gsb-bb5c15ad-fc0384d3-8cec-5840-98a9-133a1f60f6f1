@@ -220,6 +220,27 @@ CREATE TABLE IF NOT EXISTS route_segments (
 );
 CREATE INDEX IF NOT EXISTS idx_route_segments_route ON route_segments(route_id);
 
+-- ============ 勘误附记（对指定已发布版本中的事件 / 「先于」关系登记附记，只追加） ============
+-- 编辑者对某一已发布版本快照中的某个事件或某条「先于」关系登记勘误附记（说明 + 出处）。
+-- 附记只属于目标版：不随草稿恢复或以后发布的版本继承；原快照、求解日期与草稿均不改写。
+-- 同一目标（版本号 + 对象类型 + 对象 id）可多次登记：后一条以 replaces_errata_id 替代
+-- 前一条生效附记——登记时须提交所见附记号，事务内核对，两人同时替代仅一个成功，
+-- 冲突方不落库；旧附记全部保留供追溯，同一目标只展示最新生效附记。
+-- 公开读出时附记出处按 source_redactions 的精确文本遮盖规则显示；
+-- 目标版被撤回后访客不再看到该版及其附记，编辑者仍可查原文与替代链。
+CREATE TABLE IF NOT EXISTS errata (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,   -- 附记号
+  version_no         INTEGER NOT NULL,                    -- 目标已发布版本号
+  target_type        TEXT NOT NULL CHECK (target_type IN ('event','relation')),
+  target_id          INTEGER NOT NULL,                    -- 该版快照中的事件 id / 关系 id
+  note               TEXT NOT NULL,                       -- 勘误说明
+  source             TEXT NOT NULL,                       -- 出处（公开读出按遮盖规则显示）
+  editor             TEXT NOT NULL DEFAULT '',
+  replaces_errata_id INTEGER,                             -- 被替代的前一条附记号（NULL = 该目标首条）
+  created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_errata_target ON errata(version_no, target_type, target_id);
+
 -- ============ 并行编辑会话（暂存修改，提交时三方合并） ============
 -- 两名编辑者同时整理草稿时各自开启会话：开启时把当时的草稿修订号与
 -- 全部事件 / 主张 / 「先于」关系快照存入 baseline_json（基线，只读不变）；

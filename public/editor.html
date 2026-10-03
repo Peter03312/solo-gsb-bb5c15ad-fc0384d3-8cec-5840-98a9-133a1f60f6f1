@@ -117,6 +117,37 @@
     </div>
 
     <div class="card">
+      <h2>勘误附记（对指定已发布版本的事件 / 「先于」关系）</h2>
+      <p class="muted">
+        对某<b>已发布版本</b>中的事件或「先于」关系登记勘误附记（说明 + 出处）。附记<b>只属于目标版</b>：
+        不随草稿恢复或以后发布的版本继承；原快照、求解日期与草稿均不改动。同一目标只展示<b>最新生效附记</b>；
+        替代时系统自动提交你所见的附记号，两人同时替代仅一人成功（冲突方会看到当前生效附记，可再决定），
+        旧附记全部保留供追溯。目标版已撤回时不能登记；撤回后访客不再看到该版及其附记。
+        附记出处沿用「出处遮盖」规则：命中登记的文本对访客显示「出处已遮盖」，此处可查原文与替代链。
+      </p>
+      <div class="row">
+        <div class="field" style="max-width:200px">
+          <label>目标版本</label>
+          <select id="errataVersion"></select>
+        </div>
+        <button id="btnErrataLoad" type="button" class="secondary">加载该版对象与附记</button>
+      </div>
+      <div id="errataTargetPool" style="margin-top:8px"></div>
+      <div id="errataForm" style="display:none;margin-top:8px">
+        <h3 style="font-size:13px">登记附记 → <span id="errataTargetInfo"></span></h3>
+        <div id="errataCurrent"></div>
+        <label style="margin-top:6px">勘误说明（必填）</label>
+        <textarea id="errataNote" rows="2" placeholder="如：该事件日期应为 1958-09-13，口述记忆有误"></textarea>
+        <label style="margin-top:6px">勘误出处（必填，公开显示时沿用出处遮盖规则）</label>
+        <input type="text" id="errataSource" placeholder="如：《县水利志》1994 年版，第 87 页" />
+        <div style="margin-top:8px"><button id="btnErrataSubmit" type="button">登记附记</button></div>
+      </div>
+      <div id="errataMsg" style="margin-top:10px"></div>
+      <h3 style="margin-top:14px">该版附记（编辑者原文，含替代链）</h3>
+      <div id="errataList" class="muted">尚未加载。</div>
+    </div>
+
+    <div class="card">
       <h2>专题「先于」脉络路线</h2>
       <p class="muted">
         从一份<b>已发布年表</b>中按顺序挑选至少两个互异事件作为锚点，填写专题标题，形成一条可公开的脉络路线。

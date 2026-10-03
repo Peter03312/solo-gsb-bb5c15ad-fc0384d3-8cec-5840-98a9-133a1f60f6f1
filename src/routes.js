@@ -33,6 +33,13 @@ const {
   listRetractions,
 } = require('./retract');
 const {
+  registerErrata,
+  listErrataForVersion,
+  getErrataWithChain,
+  effectiveErrataForVersion,
+  applyRedactionToErrata,
+} = require('./errata');
+const {
   openSession,
   getSession,
   listSessions,
@@ -134,6 +141,8 @@ router.get('/api/public/chronicle', (req, res) => {
   }
   // 访客视图：命中已登记出处的位置统一显示「出处已遮盖」，其余字段与版本号不变
   const version = applyRedactionToVersion(getVersionDetail(no));
+  // 勘误附记：仅该版各目标的生效附记；附记出处同样按遮盖规则显示
+  version.errata = applyRedactionToErrata(effectiveErrataForVersion(no, version));
   res.json({ published: true, currentVersionNo: no, version });
 });
 
@@ -152,10 +161,12 @@ router.get('/api/public/versions', (req, res) => {
 router.get('/api/public/versions/:no', (req, res) => {
   const no = Number(req.params.no);
   const detail = getVersionDetail(no);
-  // 撤回版对访客按不存在处理
+  // 撤回版对访客按不存在处理（其勘误附记随之不可见）
   if (!detail || isRetracted(no)) throw { status: 404, message: `版本 ${req.params.no} 不存在` };
   // 访客读取指定历史版本同样应用出处遮盖
-  res.json({ version: applyRedactionToVersion(detail) });
+  const version = applyRedactionToVersion(detail);
+  version.errata = applyRedactionToErrata(effectiveErrataForVersion(no, version));
+  res.json({ version });
 });
 
 // ---- 专题「先于」脉络路线（公开只读） ----
@@ -456,7 +467,52 @@ router.get('/api/editor/versions/:no/raw', (req, res) => {
   if (!Number.isInteger(no) || no < 1) throw badRequest('版本号必须是正整数');
   const detail = getVersionDetail(no);
   if (!detail) throw { status: 404, message: `版本 ${req.params.no} 不存在` };
+  // 附该版各目标的生效勘误附记（原文，不遮盖；完整替代链见 /api/editor/versions/:no/errata）
+  detail.errata = effectiveErrataForVersion(no, detail);
   res.json({ version: detail, retraction: getRetraction(no) });
+});
+
+// ================= 勘误附记（对指定已发布版本中的事件 / 「先于」关系） =================
+// 附记只属于目标版：不随草稿恢复或以后发布的版本继承；原快照、求解日期与草稿均不改。
+// 同一目标只展示最新生效附记；替代须提交所见附记号（replacesErrataId），事务内核对，
+// 两人同时替代仅一个成功，冲突方 409 取得当前生效附记且不落库；旧附记保留供追溯。
+// 版本不存在 404；对象不属该版 422；目标版已撤回 409；字段非法 400；均不落库。
+
+// ---- 登记 / 替代附记 ----
+// 体含 versionNo、targetType（event|relation）、targetId（该版快照对象编号）、
+// note（勘误说明）、source（出处）、editor（可选）、replacesErrataId（替代时必填：
+// 登记时所见的生效附记号；目标尚无附记时省略）。
+router.post('/api/editor/errata', (req, res) => {
+  const body = req.body || {};
+  const result = registerErrata({
+    versionNo: body.versionNo,
+    targetType: body.targetType,
+    targetId: body.targetId,
+    note: body.note,
+    source: body.source,
+    editor: optionalString(body, 'editor', 200),
+    replacesErrataId: body.replacesErrataId,
+  });
+  res.status(201).json(result);
+});
+
+// ---- 指定版本的全部附记（编辑者视角）：按目标分组，含生效附记与完整替代链，原文不遮盖 ----
+router.get('/api/editor/versions/:no/errata', (req, res) => {
+  const no = Number(req.params.no);
+  if (!Number.isInteger(no) || no < 1) throw badRequest('版本号必须是正整数');
+  const detail = getVersionDetail(no);
+  if (!detail) throw { status: 404, message: `版本 ${req.params.no} 不存在` };
+  res.json({ ok: true, ...listErrataForVersion(no, detail), retraction: getRetraction(no) });
+});
+
+// ---- 单条附记及其替代链（编辑者追溯用，原文不遮盖） ----
+router.get('/api/editor/errata/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id < 1) throw badRequest('附记号必须是正整数');
+  const found = getErrataWithChain(id);
+  if (!found) throw { status: 404, message: `勘误附记 ${req.params.id} 不存在` };
+  const detail = getVersionDetail(found.versionNo);
+  res.json({ ok: true, ...getErrataWithChain(id, detail), retraction: getRetraction(found.versionNo) });
 });
 
 // ---- 按出处原文撤回公开展示：只读预览，不改数据 ----
