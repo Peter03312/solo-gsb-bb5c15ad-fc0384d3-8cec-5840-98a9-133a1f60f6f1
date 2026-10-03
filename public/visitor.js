@@ -34,6 +34,18 @@ async function main() {
     $('#chronicle').style.display = 'grid';
     $('#caveat').textContent = `本页为第 ${v.versionNo} 版不可变快照，共 ${v.eventCount} 个事件、${v.relationCount} 条先后关系。`;
 
+    // 本版当前生效的勘误附记（每目标只展示最新一条；附记只属于本版）
+    const errata = Array.isArray(v.errata) ? v.errata : [];
+    renderErrata(errata);
+    const errataByEvent = new Map();
+    const errataByRelation = new Map();
+    for (const e of errata) {
+      if (e.targetType === 'event') errataByEvent.set(e.targetId, e);
+      else errataByRelation.set(e.targetId, e);
+    }
+    const erratumBadge = (e) =>
+      e ? '<span class="badge" style="background:#fdf3e0;color:#9a6a00" title="本对象有编辑者勘误附记（见下方勘误区）">勘误</span>' : '';
+
     const titleById = new Map(v.events.map((e) => [e.eventId, e.title]));
 
     $('#timeline').innerHTML = v.events.map((e) => `
@@ -41,6 +53,7 @@ async function main() {
         <div class="date">${esc(fmtDate(e.resolvedDate))}</div>
         <div><strong>${esc(e.title)}</strong>
           <span class="badge prec">${PREC_LABEL[e.precision] || e.precision}</span>
+          ${erratumBadge(errataByEvent.get(e.eventId))}
         </div>
         ${e.description ? `<div class="muted">${esc(e.description)}</div>` : ''}
         <div class="source">
@@ -57,6 +70,7 @@ async function main() {
             <strong>${esc(titleById.get(r.earlierEventId) || '#' + r.earlierEventId)}</strong>
             <span class="badge">先于</span>
             <strong>${esc(titleById.get(r.laterEventId) || '#' + r.laterEventId)}</strong>
+            ${erratumBadge(errataByRelation.get(r.relationId))}
             ${r.source ? `<div class="source"><b>出处：</b>${esc(r.source)}</div>` : ''}
           </div>`).join('')
       : '<p class="muted">本版未记录先于关系。</p>';
@@ -65,6 +79,35 @@ async function main() {
   } catch (err) {
     msg.innerHTML = `<div class="alert error">加载失败：${esc(err.message)}</div>`;
   }
+}
+
+// ---------- 本版勘误附记（访客只读；每目标仅最新生效一条，出处按遮盖规则显示） ----------
+function erratumTargetLine(e) {
+  if (e.targetType === 'event') {
+    return `事件 <strong>${esc(e.title || '#' + e.targetId)}</strong>`;
+  }
+  return `「先于」关系 <strong>${esc(e.earlierTitle || '#' + e.earlierEventId)}</strong>
+          <span class="badge">先于</span>
+          <strong>${esc(e.laterTitle || '#' + e.laterEventId)}</strong>`;
+}
+
+function renderErrata(errata) {
+  const card = $('#errataCard');
+  if (!errata.length) {
+    card.style.display = 'none';
+    $('#errataList').innerHTML = '';
+    return;
+  }
+  card.style.display = '';
+  $('#errataList').innerHTML = errata.map((e) => `
+    <div class="rel-line">
+      <div>${erratumTargetLine(e)}</div>
+      <div class="source" style="margin-top:2px">
+        <b>勘误：</b>${esc(e.content)}
+        <br><b>出处：</b>${esc(e.source || '（未注明）')}
+        <span class="muted"> · ${esc((e.createdAt || '').replace('T', ' ').slice(0, 16))} UTC${e.editor ? ' · ' + esc(e.editor) : ''}</span>
+      </div>
+    </div>`).join('');
 }
 
 // ---------- 专题脉络路线（公开只读，出处已按遮盖规则处理） ----------

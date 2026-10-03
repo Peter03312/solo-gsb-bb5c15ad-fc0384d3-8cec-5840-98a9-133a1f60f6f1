@@ -253,6 +253,33 @@ CREATE TABLE IF NOT EXISTS edit_session_ops (
   UNIQUE (session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_session_ops_session ON edit_session_ops(session_id);
+
+-- ============ 已发布版本勘误附记（只追加，附记只属于目标版） ============
+-- 编辑者对**指定已发布版本**快照中的事件或「先于」关系登记勘误附记：
+-- 填写该版快照对象编号（target_id：version_events.event_id 或
+-- version_relations.relation_id）、勘误说明 content 与出处 source。
+--
+--   - 附记只属于目标版：不随草稿恢复或以后发布的版本继承（登记在版本号维度，
+--     读出时仅附加到该目标版）；登记不改写任何历史快照、求解日期或草稿；
+--   - 同一目标（version_no + target_type + target_id）只展示**编号最大**的
+--     一条为生效附记；旧行原样保留，经 supersedes_id 串成替代链供追溯；
+--   - 替代必须提交所见附记号（乐观并发）：事务内与当前生效附记号不符即 409，
+--     响应携带当前附记全文、冲突方不落库；
+--   - 目标版已撤回时拒绝新登记（旧附记保留，编辑者仍可查阅；访客随撤回版一并隐藏）。
+-- 附记不触碰草稿区，与草稿修订号无关；访客读出时出处沿用现有精确文本遮盖规则。
+CREATE TABLE IF NOT EXISTS version_errata (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,      -- 附记号
+  version_no    INTEGER NOT NULL,                       -- 目标已发布版本号
+  target_type   TEXT NOT NULL CHECK (target_type IN ('event','relation')),
+  target_id     INTEGER NOT NULL,                       -- 该版快照中的事件 id / 关系 id
+  content       TEXT NOT NULL,                          -- 勘误说明（非空）
+  source        TEXT NOT NULL,                          -- 勘误出处（非空精确文本）
+  editor        TEXT NOT NULL DEFAULT '',
+  supersedes_id INTEGER,                                -- 所替代的上一条附记号（首条为 NULL）
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_errata_target
+  ON version_errata(version_no, target_type, target_id, id);
 `;
 
 let db;

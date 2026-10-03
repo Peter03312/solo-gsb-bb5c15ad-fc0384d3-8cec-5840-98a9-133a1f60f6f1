@@ -226,6 +226,7 @@ async function loadVersions() {
             ${v.retracted ? '<span class="badge" style="background:#fbeaea;color:#a33">已撤回</span>' : ''}
             <span class="muted" style="flex:1">${v.publishedAt.replace('T', ' ').slice(0, 16)} UTC · ${esc(v.editor || '匿名')}${v.parentNo ? ` · 基于第 ${v.parentNo} 版` : ''}</span>
             <button class="secondary" type="button" data-restore-version="${v.versionNo}" style="padding:2px 10px;font-size:13px">预览并恢复草稿</button>
+            <button class="secondary" type="button" data-errata-version="${v.versionNo}" style="padding:2px 10px;font-size:13px">勘误附记</button>
             ${v.retracted ? '' : `<button class="danger" type="button" data-retract-version="${v.versionNo}" style="padding:2px 10px;font-size:13px">撤回该版</button>`}
           </div>
           ${v.note ? `<div>${esc(v.note)}</div>` : ''}
@@ -271,6 +272,213 @@ async function retractVersionFromUi(versionNo) {
     await loadState();
   } catch (err) {
     if (err.message !== 'unauthorized') showGlobal('error', esc(err.message));
+  }
+}
+
+// ---------- 已发布版本勘误附记（登记 / 替代 / 查阅替代链） ----------
+let errataVersionNo = null;       // 当前打开的目标版号
+let errataRaw = null;             // 该版快照原文（取快照对象编号）
+let errataList = null;            // 该版全部附记
+let errataTargetType = 'event';   // 表单当前目标类型
+let errataSelectedTarget = null;  // { targetType, targetId } 或 null（未选）
+
+async function openErrataDialog(versionNo) {
+  errataVersionNo = versionNo;
+  errataTargetType = 'event';
+  errataSelectedTarget = null;
+  $('#errataVersionNo').textContent = versionNo;
+  $('#errataBody').textContent = '加载中…';
+  $('#errataDialog').showModal();
+  await reloadErrataDialog();
+}
+
+async function reloadErrataDialog() {
+  try {
+    const [raw, list] = await Promise.all([
+      api('GET', `/api/editor/versions/${errataVersionNo}/raw`),
+      api('GET', `/api/editor/versions/${errataVersionNo}/errata`),
+    ]);
+    errataRaw = raw;
+    errataList = list;
+    $('#errataBody').innerHTML = renderErrataDialog();
+    bindErrataForm();
+  } catch (err) {
+    if (err.message === 'unauthorized') { $('#errataDialog').close(); return; }
+    $('#errataBody').innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
+  }
+}
+
+function renderErrataDialog() {
+  const v = errataRaw.version;
+  const retracted = !!errataRaw.retraction;
+  const list = errataList.errata || [];
+
+  // 校正表单选择：类型非法 / 未选 / 所选对象不在该类型快照中时，回退到第一项
+  if (errataTargetType !== 'event' && errataTargetType !== 'relation') errataTargetType = 'event';
+  const idKey = errataTargetType === 'event' ? 'eventId' : 'relationId';
+  const pool = errataTargetType === 'event' ? v.events : v.relations;
+  if (!errataSelectedTarget || errataSelectedTarget.targetType !== errataTargetType ||
+      !pool.some((x) => x[idKey] === errataSelectedTarget.targetId)) {
+    errataSelectedTarget = pool.length ? { targetType: errataTargetType, targetId: pool[0][idKey] } : null;
+  }
+
+  const eventOptions = v.events
+    .map((e) => `<option value="event:${e.eventId}"${errataTargetType === 'event' && errataSelectedTarget && errataSelectedTarget.targetId === e.eventId ? ' selected' : ''}>事件「${esc(e.title)}」（编号 ${e.eventId}）</option>`)
+    .join('');
+  const relationOptions = v.relations.length
+    ? v.relations.map((r) => {
+        const byId = new Map(v.events.map((x) => [x.eventId, x.title]));
+        return `<option value="relation:${r.relationId}"${errataTargetType === 'relation' && errataSelectedTarget && errataSelectedTarget.targetId === r.relationId ? ' selected' : ''}>关系 #${r.relationId}：${esc(byId.get(r.earlierEventId) || '#' + r.earlierEventId)} → ${esc(byId.get(r.laterEventId) || '#' + r.laterEventId)}</option>`;
+      }).join('')
+    : '<option value="">（本版无先于关系）</option>';
+
+  // 当前选中目标的生效附记（决定表单是「登记」还是「替代」）
+  const active = errataSelectedTarget
+    ? (errataList.activeErrata || []).find(
+        (e) => e.targetType === errataSelectedTarget.targetType && e.targetId === errataSelectedTarget.targetId
+      )
+    : null;
+
+  const form = retracted
+    ? '<div class="alert error">本版已撤回：不能再登记新的勘误附记；下列既有附记保留供编辑者追溯，访客随撤回版一并不可见。</div>'
+    : `
+      <h3 style="font-size:14px">登记 / 替代勘误附记</h3>
+      <div class="row">
+        <div class="field" style="max-width:140px">
+          <label>对象类型</label>
+          <select id="errataTargetType">
+            <option value="event"${errataTargetType === 'event' ? ' selected' : ''}>事件</option>
+            <option value="relation"${errataTargetType === 'relation' ? ' selected' : ''}>「先于」关系</option>
+          </select>
+        </div>
+        <div class="field" style="flex:1">
+          <label>该版快照对象（编号取自本版快照）</label>
+          <select id="errataTargetId">${errataTargetType === 'event' ? eventOptions : relationOptions}</select>
+        </div>
+      </div>
+      <label style="margin-top:8px">勘误说明</label>
+      <textarea id="errataContent" rows="2" placeholder="如：经核对档案，该事件具体应为 1959 年 3 月（不改原快照，仅作附记）"></textarea>
+      <label style="margin-top:8px">勘误出处（受访人 / 档案全宗 / 页码等，访客视图沿用精确遮盖规则）</label>
+      <input type="text" id="errataSource" placeholder="如：县档案馆全宗 03 第 12 页" />
+      ${active ? `
+        <div class="alert warn" style="margin-top:8px">
+          该目标当前已有<b>生效附记 #${active.erratumId}</b>（${esc((active.createdAt || '').replace('T', ' ').slice(0, 16))} UTC）：
+          「${esc(active.content)}」。提交即<b>替代</b>它（须携带所见附记号 ${active.erratumId}）；
+          旧附记保留在下方替代链中供追溯。若两位编辑者同时替代，仅一个成功，冲突方不会落库。
+        </div>` : '<p class="muted" style="margin-top:6px">该目标尚无附记，提交后成为其首条生效附记。</p>'}
+      <div style="margin-top:8px">
+        <button id="btnErrataSubmit" type="button">${active ? `提交替代（所见附记号 ${active.erratumId}）` : '登记勘误附记'}</button>
+      </div>`;
+
+  // 附记清单（含旧附记；可展开替代链）
+  const groups = new Map();
+  for (const e of list) {
+    const key = `${e.targetType}:${e.targetId}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
+  }
+  const listHtml = groups.size
+    ? [...groups.entries()].map(([key, arr]) => {
+        const head = arr[arr.length - 1];
+        const tlabel = head.targetType === 'event'
+          ? `事件「${esc(head.title || '#' + head.targetId)}」（编号 ${head.targetId}）`
+          : `「先于」关系 #${head.targetId}：${esc(head.earlierTitle || '#' + head.earlierEventId)} → ${esc(head.laterTitle || '#' + head.laterEventId)}`;
+        return `
+          <div class="rel-line">
+            <strong>${tlabel}</strong>
+            <div class="source" style="margin-top:2px">
+              <b>生效附记 #${head.erratumId}：</b>${esc(head.content)}
+              <br><b>出处：</b>${esc(head.source)}
+              <span class="muted"> · ${esc((head.createdAt || '').replace('T', ' ').slice(0, 16))} UTC · ${esc(head.editor || '匿名编辑')}</span>
+            </div>
+            ${arr.length > 1
+              ? `<details style="margin-top:4px"><summary class="muted" style="cursor:pointer">替代链（${arr.length} 条，含已失效旧附记，均保留原文）</summary>
+                 <ol class="muted" style="margin:6px 0 0 18px">
+                   ${arr.map((e) => `<li style="margin-bottom:4px">#${e.erratumId}${e.active ? '（生效）' : '（已替代）'}：${esc(e.content)} —— ${esc(e.source)}
+                     <span class="muted">${esc((e.createdAt || '').replace('T', ' ').slice(0, 16))} UTC · ${esc(e.editor || '匿名编辑')}${e.supersedesErratumId ? ` · 替代 #${e.supersedesErratumId}` : ''}</span></li>`).join('')}
+                 </ol></details>`
+              : ''}
+          </div>`;
+      }).join('')
+    : '<p class="muted">本版尚无勘误附记。</p>';
+
+  return `
+    ${retracted && errataRaw.retraction
+      ? `<div class="alert error" style="margin-bottom:10px">本版已撤回：${esc(errataRaw.retraction.reason)}（${esc(errataRaw.retraction.retractedAt)} UTC）</div>`
+      : ''}
+    <p class="muted">附记只属于<b>第 ${errataVersionNo} 版</b>：不改写快照、求解日期与草稿，也不随草稿恢复或以后发布的版本继承；
+      同一对象只展示最新生效一条，旧附记保留可追溯。</p>
+    ${form}
+    <h3 style="font-size:14px;margin-top:14px">本版附记与替代链（编辑者可见原文）</h3>
+    ${listHtml}`;
+}
+
+function bindErrataForm() {
+  const typeSel = $('#errataTargetType');
+  if (typeSel) {
+    typeSel.addEventListener('change', () => {
+      errataTargetType = typeSel.value;
+      errataSelectedTarget = null; // renderErrataDialog 会回退到新类型的第一项
+      $('#errataBody').innerHTML = renderErrataDialog();
+      bindErrataForm();
+    });
+  }
+  const idSel = $('#errataTargetId');
+  if (idSel) {
+    idSel.addEventListener('change', () => {
+      const [t, id] = idSel.value.split(':');
+      errataTargetType = t;
+      errataSelectedTarget = id ? { targetType: t, targetId: Number(id) } : null;
+      $('#errataBody').innerHTML = renderErrataDialog();
+      bindErrataForm();
+    });
+  }
+  const btn = $('#btnErrataSubmit');
+  if (btn) btn.addEventListener('click', submitErratum);
+}
+
+async function submitErratum() {
+  const content = $('#errataContent').value;
+  const source = $('#errataSource').value;
+  if (!errataSelectedTarget) {
+    showGlobal('error', '请选择该版快照中的事件或「先于」关系。');
+    return;
+  }
+  const active = (errataList.activeErrata || []).find(
+    (e) => e.targetType === errataSelectedTarget.targetType && e.targetId === errataSelectedTarget.targetId
+  );
+  const body = {
+    targetType: errataSelectedTarget.targetType,
+    targetId: errataSelectedTarget.targetId,
+    content,
+    source,
+    editor: store.editor || '匿名编辑',
+  };
+  if (active) body.expectedErratumId = active.erratumId;
+  try {
+    const data = await api('POST', `/api/editor/versions/${errataVersionNo}/errata`, body);
+    showGlobal(
+      'ok',
+      active
+        ? `已以附记 <b>#${data.erratum.erratumId}</b> 替代第 ${errataVersionNo} 版该对象的旧附记 #${active.erratumId}；旧附记保留在替代链中。`
+        : `已为第 ${errataVersionNo} 版登记勘误附记 <b>#${data.erratum.erratumId}</b>；访客读取该版即可见。`
+    );
+    $('#errataContent').value = '';
+    $('#errataSource').value = '';
+    await reloadErrataDialog();
+    await loadState();
+  } catch (err) {
+    if (err.message === 'unauthorized') return;
+    if (err.status === 409 && err.body && err.body.code === 'ERRATA_CONFLICT') {
+      const cur = err.body.currentErratum;
+      showGlobal(
+        'warn',
+        `冲突：该目标的生效附记已被另一位编辑者更新${cur ? `为 <b>#${cur.erratumId}</b>（${esc(cur.content)}）` : '（已无生效附记）'}，本次替代<b>未落库</b>。对话框已刷新，请取得当前附记号后重试。`
+      );
+      await reloadErrataDialog();
+    } else {
+      showGlobal('error', esc(err.message));
+    }
   }
 }
 
@@ -742,7 +950,17 @@ async function openRawVersion(versionNo) {
       <p class="muted">${v.eventCount} 个事件、${v.relationCount} 条关系 · 发布于 ${esc(v.publishedAt)} UTC。
         以下为快照<b>原文</b>；访客公开接口中命中遮盖登记的出处会显示「出处已遮盖」。</p>
       <h3 style="font-size:13px">事件与被选主张</h3>${evs}
-      <h3 style="font-size:13px;margin-top:10px">「先于」关系</h3>${rels}`;
+      <h3 style="font-size:13px;margin-top:10px">「先于」关系</h3>${rels}
+      ${(data.activeErrata || []).length
+        ? `<h3 style="font-size:13px;margin-top:10px">本版当前生效勘误附记（原文，${data.activeErrata.length} 条；旧附记见「勘误附记」对话框）</h3>
+           ${data.activeErrata.map((em) => `
+             <div class="rel-line">
+               <strong>${em.targetType === 'event'
+                 ? `事件「${esc(em.title || '#' + em.targetId)}」`
+                 : `关系 #${em.targetId}：${esc(em.earlierTitle || '#' + em.earlierEventId)} → ${esc(em.laterTitle || '#' + em.laterEventId)}`}</strong>
+               <div class="source"><b>勘误：</b>${esc(em.content)}<br><b>出处：</b>${esc(em.source)}</div>
+             </div>`).join('')}`
+        : ''}`;
   } catch (err) {
     if (err.message === 'unauthorized') { $('#rawVersionDialog').close(); return; }
     $('#rawVersionBody').innerHTML = `<div class="alert error">${esc(err.message)}</div>`;
@@ -1460,6 +1678,9 @@ async function onClick(e) {
   if (restoreVersion !== undefined) return openRestorePreview(Number(restoreVersion));
   const retractVersion = t.dataset && t.dataset.retractVersion;
   if (retractVersion !== undefined) return retractVersionFromUi(Number(retractVersion));
+  const errataVersion = t.dataset && t.dataset.errataVersion;
+  if (errataVersion !== undefined) return openErrataDialog(Number(errataVersion));
+  if (t.id === 'errataClose') { $('#errataDialog').close(); errataVersionNo = null; return; }
 
   if (t.id === 'btnBundlePreview') return previewBundleImport();
   if (t.id === 'bundleCancel') { $('#bundleDialog').close(); bundleParsed = null; bundlePreview = null; return; }

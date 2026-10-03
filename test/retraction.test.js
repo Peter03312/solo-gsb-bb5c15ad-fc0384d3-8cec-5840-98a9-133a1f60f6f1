@@ -409,8 +409,9 @@ test('未撤回版接口结构与出处遮盖保持兼容', async () => {
   const v = pub.json.version;
   assert.deepStrictEqual(
     Object.keys(v).sort(),
-    ['versionNo', 'parentNo', 'editor', 'note', 'publishedAt', 'eventCount', 'relationCount', 'events', 'relations'].sort()
+    ['versionNo', 'parentNo', 'editor', 'note', 'publishedAt', 'eventCount', 'relationCount', 'events', 'relations', 'errata'].sort()
   );
+  assert.deepStrictEqual(v.errata, []); // 该版未登记勘误附记
   assert.strictEqual(v.events.find((e) => e.title === '动员会').source, '出处已遮盖');
   assert.strictEqual(v.events.find((e) => e.title === '通水会').source, '王秀兰口述');
 

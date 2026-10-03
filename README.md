@@ -316,6 +316,62 @@ curl -s -X POST "$BASE/api/editor/publish" \
 
 完整可运行的端到端示例见 `examples/retraction-example.sh`（建草稿发两版、建路线、撤回、访客/编辑者视图对照、幂等、基准版预约到期转冲突、修正后重新发布、全部撤回显示「尚无可读版本」，约 6 秒）。
 
+### 对已发布版本登记勘误附记（附记只属于目标版）
+
+受访人事后更正或发现档案新证时，编辑者可对**指定已发布版本**快照中的**事件**或**「先于」关系**登记一条勘误附记（编辑台「已发布版本」中每版的「勘误附记」按钮，或直接调用 HTTP API），填写**该版快照对象编号**（事件的 `eventId` 或关系的 `relationId`，即快照里的对象编号）、**勘误说明**与**出处**：
+
+- **只追加、不改正文**：附记只在 `version_errata` 表追加，**原快照、求解日期与草稿一律不改**，也不推进草稿修订号。
+- **只属于目标版**：附记以版本号维度登记，读出时只附加到该目标版；**不随从历史版本恢复草稿而进入草稿，也不被以后发布的任何新版本继承**（新版本初始无附记，需要时另行登记）。
+- **同一目标只展示最新生效附记**：目标 = `版本号 + 对象类型 + 快照对象编号`。再次登记即**替代**，必须提交**所见附记号** `expectedErratumId`（首条可省略或传 `0`）；旧附记**不更新不删除**，经替代链保留供编辑者追溯。
+- **并发替代裁决**：两个编辑者同时替代同一目标时，事务内按提交顺序裁决，**仅一个成功**；失败方收到 **409** `ERRATA_CONFLICT`，响应直接携带**当前生效附记全文**（无需再查），冲突方**不落库**，取到当前附记号后可重试。
+- **访客可见、出处沿用遮盖**：访客读取**目标版**（最新年表或指定历史版本）时，版本对象中新增 `errata` 数组（每目标仅最新生效一条，附目标标题 / 关系两端、说明、出处、时间、编辑者），页面事件 / 关系旁显示「勘误」标记，下方「本版勘误附记」卡片列出全文。附记**出处与快照出处共用同一套精确文本遮盖规则**——凡按出处原文登记遮盖的文本，无论出现在快照还是附记中，访客一律看到「出处已遮盖」；持编辑口令可查附记原文与完整替代链。
+- **拒绝条件**：版本不存在 **404**；对象不存在或**不属于该版** **422** `ERRATA_TARGET_NOT_IN_VERSION`；目标版**已撤回** **409** `VERSION_RETRACTED`（既有附记保留，编辑者仍可查阅）；对象类型非法、对象编号 / 版本号非法、说明或出处为空 / 纯空白 / 超长 **400**。
+- **撤回联动**：目标版撤回后，访客不再看到该版，其附记随之不可见（撤回版详情按不存在处理）；撤回不删除附记，编辑者仍可在该版附记清单与替代链中追溯。
+
+```bash
+TOKEN=editor
+BASE=http://localhost:3000
+
+# 对第 2 版快照中的事件 7 登记首条附记（targetId 取该版快照中的 eventId/relationId）
+curl -s -X POST "$BASE/api/editor/versions/2/errata" \
+  -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" \
+  -d '{"targetType":"event","targetId":7,
+       "content":"经核对档案，该会议具体应为 1958 年 10 月 3 日（原快照日期不改，仅作附记）",
+       "source":"县档案馆全宗 03 第 13 页","editor":"志愿者小王"}'
+# => 201 {"ok":true,"erratum":{"erratumId":1,"versionNo":2,"targetType":"event","targetId":7,
+#        "content":"…","source":"…","supersedesErratumId":null,"createdAt":"…"},
+#        "previousErratum":null,"currentVersionNo":3}
+
+# 对该版的「先于」关系登记附记
+curl -s -X POST "$BASE/api/editor/versions/2/errata" \
+  -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" \
+  -d '{"targetType":"relation","targetId":4,"content":"先后方向待再核","source":"2026-08-01 回访录音"}'
+
+# 访客读目标版：version.errata 为该版生效附记（出处按遮盖规则显示）
+curl -s "$BASE/api/public/versions/2" | jq '.version.errata'
+curl -s "$BASE/api/public/chronicle"   # 最新版即第 2 版时同样带 errata
+
+# 替代：必须提交所见附记号（此处为 1）；不带 / 带错 → 409 并返回当前附记
+curl -s -X POST "$BASE/api/editor/versions/2/errata" \
+  -H "Content-Type: application/json" -H "X-Editor-Token: $TOKEN" \
+  -d '{"targetType":"event","targetId":7,"content":"再核：10 月 3 日上午","source":"档案 03 第 14 页",
+       "expectedErratumId":1}'
+# => 201 {"ok":true,"erratum":{"erratumId":5,"supersedesErratumId":1,…},"previousErratum":{…旧附记…}}
+
+# 并发冲突时失败方拿到当前附记（不落库）：
+# => 409 {"code":"ERRATA_CONFLICT","versionNo":2,
+#        "target":{…"title":"修水渠动员会"},
+#        "expectedErratumId":1,"currentErratum":{"erratumId":5,…当前生效全文…}}
+
+# 编辑者查阅：该版全部附记（含已替代旧附记，active 标记）/ 单条原文 / 替代链
+curl -s -H "X-Editor-Token: $TOKEN" "$BASE/api/editor/versions/2/errata"
+curl -s -H "X-Editor-Token: $TOKEN" "$BASE/api/editor/errata/5"
+curl -s -H "X-Editor-Token: $TOKEN" "$BASE/api/editor/errata/5/chain"
+curl -s -H "X-Editor-Token: $TOKEN" "$BASE/api/editor/errata"            # 全部版本附记清单
+```
+
+完整可运行的端到端示例见 `examples/errata-example.sh`（登记事件 / 关系附记、访客视图与遮盖联动、所见号替代、两人并发替代仅一个成功、替代链追溯、撤回拒绝与不可见、发新版不继承、404/422/400 各类拒绝）。
+
 ### 专题「先于」脉络路线
 
 编辑者可从一份**已发布年表**中按顺序挑选至少两个互异事件作为**锚点**，填写专题标题，形成一条可公开的脉络路线（编辑台「专题『先于』脉络路线」卡片，或直接调用 HTTP API）：
@@ -438,6 +494,8 @@ curl -s -H "X-Editor-Token: $TOKEN" "$BASE/api/editor/sessions/1"    # 会话详
 
 凡编辑者已按出处原文登记遮盖的位置，访客在最新年表与任一历史版本中都只看到 **「出处已遮盖」**（快照原文仍在库中，仅持编辑口令的接口可查看）。**已撤回的版本不出现在访客版本清单中，指定撤回版与引用它的专题路线一律按不存在处理（404）。**
 
+编辑者对某版快照中事件或「先于」关系登记的**勘误附记**也在访客视图展示：事件 / 关系旁有「勘误」标记，页面下方「本版勘误附记」卡片列出每个对象**最新一条生效附记**（同一对象被替代后的旧附记不对访客展示）；附记只属于该版，不改动原快照日期与出处、草稿也不受影响，且不被其他版本继承；附记出处同样按上述精确遮盖规则显示。
+
 页面下方「专题脉络路线」卡片列出编辑者已建立的专题路线：锚点事件按顺序排列，相邻锚点之间展示该版关系图中关系数最少的见证链（锚点与链上中间事件分别标注），只展示路线涉及的事件与关系，出处同样按遮盖规则显示。
 
 ## 数据与备份
@@ -451,6 +509,7 @@ curl -s -H "X-Editor-Token: $TOKEN" "$BASE/api/editor/sessions/1"    # 会话详
 - 预约发布表 `publish_schedules` 在建立时冻结完整待发布内容（事件 / 所选主张 / 关系 / 求解日期）与基准版本号；`status` 在待执行（`pending`）、已发布（`published`）、冲突（`conflict`）、已取消（`cancelled`）间单向流转。到期写版本与翻状态在同一事务内完成，重启只补跑 `pending` 行；**冻结基准版已被撤回的预约到期转冲突，不生成新版本**。
 - 脉络路线表 `routes / route_anchors / route_segments` 同样只追加：建立时冻结所据版本号、锚点顺序与每段见证链（事件 id 序列与关系 id 序列），展示字段读自该版不可变快照，因此改草稿、恢复草稿、发新版都不影响旧路线。
 - 并行编辑会话表 `edit_sessions / edit_session_ops`：开启会话时把当时的草稿修订号与完整草稿快照写入 `baseline_json`（基线只读）；会话内的修改按操作逐条暂存于 `edit_session_ops`（不触碰草稿区，也不推进草稿修订号）。提交时三方合并的结果（新修订号与编号映射，或冲突明细）存回 `result_json`，会话随即关闭（`committed` / `conflicted` 终态），重复提交直接返回该结果、绝不重复写入。
+- 勘误附记表 `version_errata` 只追加：目标版号、对象类型（事件 / 「先于」关系）与**该版快照对象编号**、勘误说明、出处、编辑者、`supersedes_id`（所替代的上一条）。同一目标（版号 + 类型 + 对象编号）以编号最大的一条为生效附记，旧行保留成替代链；登记不改写快照、求解日期或草稿，不随恢复草稿 / 新发布版本继承；访客读出层动态附加生效附记并对其出处应用精确遮盖，目标版撤回后附记随该版对访客隐藏（行不删除，编辑者仍可查原文与替代链）。
 
 ## 目录结构
 
@@ -466,6 +525,10 @@ src/
   bundle.js     采访整理包导入：整包校验 + 内容指纹 + 只读预览 + 事务追加（批次防重/修订号冲突检查）
   redact.js     出处遮盖：精确出处文本的只读命中预览 + 只追加登记（版本号冲突检查）；公开读出层动态替换为「出处已遮盖」
   retract.js    版本撤回：按版本号 + 非空原因只追加审计记录（快照/版本号不变，重复撤回幂等返回首次记录）；公开读出层隐藏撤回版（最新年表指向最大未撤回版，撤回版详情与引用它的路线按不存在处理）
+  errata.js     已发布版本勘误附记：按「目标版号 + 对象类型 + 该版快照对象编号」只追加登记（说明 + 出处）；
+                同目标以编号最大者为生效附记，旧附记经 supersedes 成替代链保留；替代须提交所见附记号，
+                事务内裁决并发（两人同时替代仅一个成功，冲突方 409 取得当前附记且不落库）；
+                版本/对象/撤回/空字段分别 404/422/409/400；公开读出层附加生效附记并对其出处应用精确遮盖
   schedule.js   预约发布：建立时冻结快照/基准版本号；到期按时间、预约号顺序逐条事务执行（发布或标冲突，幂等不重发不留半版；基准版已撤回 → 冲突）；查看/取消
   scheduler.js  预约调度器：每秒检查到期预约，服务启动立即补跑（重启安全）
   route.js      专题脉络路线：锚点校验 + 分层 BFS 求最少关系见证链（同长度按关系 ID 序列择小）+ 冻结落库；公开读出层动态遮盖出处
@@ -475,16 +538,16 @@ src/
                 成功提交事务内原子应用（修订号只推进一次）并返回临时编号映射，重复提交幂等
   seed.js       演示数据
 public/         访客页与编辑台（原生 HTML/CSS/JS）
-examples/       采访整理包 JSON 示例；出处遮盖、预约发布、脉络路线、版本撤回、并行编辑会话 curl 调用示例
-test/           node:test 单元与端到端测试（含成环、无解、409 冲突、草稿恢复、整理包导入、出处遮盖、预约发布/重启补跑、脉络路线、版本撤回、并行编辑会话三方合并）
+examples/       采访整理包 JSON 示例；出处遮盖、预约发布、脉络路线、版本撤回、勘误附记、并行编辑会话 curl 调用示例
+test/           node:test 单元与端到端测试（含成环、无解、409 冲突、草稿恢复、整理包导入、出处遮盖、预约发布/重启补跑、脉络路线、版本撤回、勘误附记登记/替代并发/撤回不继承、并行编辑会话三方合并）
 ```
 
 ## 主要 HTTP API
 
 公开（无口令）：
 
-- `GET /api/public/chronicle` — 编号最大的**未撤回**已发布版本完整快照（命中遮盖登记的 `source` 显示「出处已遮盖」；全部撤回时 `{published:false, allRetracted:true, message:"尚无可读版本…"}`）
-- `GET /api/public/versions` / `GET /api/public/versions/:no` — 版本清单 / 指定版本（**均不含撤回版**；指定撤回版按不存在处理 404；未撤回版同样应用遮盖，结构不变）
+- `GET /api/public/chronicle` — 编号最大的**未撤回**已发布版本完整快照（命中遮盖登记的 `source` 显示「出处已遮盖」；`version.errata` 为该版当前生效的勘误附记；全部撤回时 `{published:false, allRetracted:true, message:"尚无可读版本…"}`）
+- `GET /api/public/versions` / `GET /api/public/versions/:no` — 版本清单 / 指定版本（**均不含撤回版**；指定撤回版按不存在处理 404；未撤回版同样应用遮盖，并在 `version.errata` 附该版生效勘误附记，结构其余不变）
 - `GET /api/public/routes` / `GET /api/public/routes/:no` — 脉络路线清单 / 路线详情（只含路线涉及的事件与关系，锚点与中间事件以 `role` 区分，出处同样应用遮盖；**引用撤回版的路线隐藏 / 404**）
 
 编辑（需请求头 `X-Editor-Token`）：
@@ -520,7 +583,14 @@ test/           node:test 单元与端到端测试（含成环、无解、409 �
 - `GET  /api/editor/schedules/:no` — 预约详情（展开冻结的完整事件 / 主张 / 关系 / 求解日期；不存在 404）
 - `DELETE /api/editor/schedules/:no` — 取消尚未执行的预约（200 `{cancelled:true}`；重复取消已取消的预约幂等 200 且 `alreadyCancelled:true`）
   - 409：`{code:"SCHEDULE_NOT_CANCELLABLE", statusNow:"published"|"conflict", resultVersionNo}`（已生效不能取消）；不存在 404
-- `GET  /api/editor/versions/:no/raw` — 指定版本快照**原文**（持编辑口令，不应用遮盖；撤回版同样可见，响应附 `retraction`，未撤回为 `null`；恢复草稿亦用原文）
+- `GET  /api/editor/versions/:no/raw` — 指定版本快照**原文**（持编辑口令，不应用遮盖；撤回版同样可见，响应附 `retraction` 与该版当前生效附记 `activeErrata`（出处原文）；恢复草稿亦用原文）
+- `POST /api/editor/versions/:no/errata` — 对第 `:no` 版快照中的对象登记 / 替代勘误附记；体含 `targetType`（`event`|`relation`）、`targetId`（**该版快照对象编号**：事件 `eventId` / 关系 `relationId`）、`content`（勘误说明，≤2000 字）、`source`（勘误出处，≤1000 字）、`expectedErratumId`（所见生效附记号；省略 / 0 表示首条）、`editor`
+  - 201：`{ok:true, erratum:{erratumId, versionNo, targetType, targetId, content, source, editor, supersedesErratumId, createdAt}, previousErratum:null|{…旧附记…}, currentVersionNo}`（只追加；快照、求解日期、草稿不变）
+  - 404：版本不存在；422：`{code:"ERRATA_TARGET_NOT_IN_VERSION", versionNo, targetType, targetId}`（对象不存在 / 不属该版）；409：`{code:"VERSION_RETRACTED", versionNo}`（目标版已撤回）；409：`{code:"ERRATA_CONFLICT", expectedErratumId, currentErratum:{…当前生效全文…}, target:{…标题…}}`（所见附记号过期，两人并发替代仅一个成功，冲突方不落库但取得当前附记）；400：类型 / 编号 / 版本号非法或说明、出处为空 / 超长
+- `GET  /api/editor/versions/:no/errata` — 该版全部附记（含已替代旧附记，每项 `active` 标记；另有 `activeErrata` 仅生效项与 `retracted`）；版本不存在 404
+- `GET  /api/editor/errata` — 全部版本的附记清单（编辑者视角，出处原文）
+- `GET  /api/editor/errata/:id` — 单条附记原文（附其目标版是否撤回 `retracted`）；不存在 404
+- `GET  /api/editor/errata/:id/chain` — 该附记所在目标的**替代链**（`chain` 按登记先后含全部新旧附记、`activeErratumId`、`target` 标题信息、`versionRetracted`）；不存在 404
 - `POST /api/editor/versions/:no/retract` — 撤回指定已发布版本（只追加审计记录，快照与版本号不变）；体含 `reason`（非空撤回原因，≤1000 字）、`editor`
   - 200：`{ok, alreadyRetracted:false, retraction:{versionNo,reason,editor,retractedAt}, currentVersionNo, latestVisibleVersionNo}`；**重复撤回幂等**：200 且 `alreadyRetracted:true`，返回首次记录、不覆盖原因
   - 404：版本不存在；400：版本号非法或原因为空 / 纯空白 / 非字符串 / 超长；均不改状态
